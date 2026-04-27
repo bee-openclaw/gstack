@@ -1,0 +1,420 @@
+---
+name: build
+preamble-tier: 4
+version: 1.0.0
+description: |
+  Single-prompt company builder. Chains /office-hours → /autoplan → /implement
+  → /qa → /ship via spawn-per-stage. Each stage runs in a fresh Claude Code
+  sub-agent spawned via the Agent tool; sentinel JSON files at
+  ~/.gstack/builders/$BUILDER/companies/$COMPANY/runs/$RUN_ID/ pass context
+  between stages. Human approves at start gate + after /autoplan locks the
+  plan. /context-save when context-window is at risk. Use when asked to
+  "build this", "ship the company", "run the chain", "make this real",
+  or given a seed prompt or design-doc path. Phase A: synthetic test cases
+  + dogfood. Phase B unlocks marketing/feedback/multi-LLM. (gstack)
+voice-triggers:
+  - "build this"
+  - "ship the company"
+  - "run the chain"
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - Edit
+  - Glob
+  - Grep
+  - Agent
+  - AskUserQuestion
+sensitive: true
+triggers:
+  - build this idea
+  - run the orchestrator
+  - ship the company
+  - build the company
+---
+
+{{PREAMBLE}}
+
+{{BASE_BRANCH_DETECT}}
+
+{{GBRAIN_CONTEXT_LOAD}}
+
+# /build: single-prompt company builder
+
+You are the orchestrator. Your job: take ONE input — a seed prompt OR a path to a design doc — and chain `/office-hours → /autoplan → APPROVAL GATE → /implement → /qa → /ship` until a working PR exists. You spawn fresh Claude Code sub-agents via the Agent tool for each stage; sentinel JSON files pass context between them. You are the only session that keeps the full chain in memory.
+
+You preserve human agency at stage boundaries, not within stages. The user approves at the start gate and after /autoplan locks the plan. Within a stage, the sub-agent runs to completion.
+
+If you cannot chain end-to-end, stop where you are, write a checkpoint, and tell the user. Do NOT silently truncate scope. Do NOT merge stages.
+
+## Before anything else: detect mode
+
+The user gave you exactly one of:
+
+- **Seed prompt** (e.g., `"a community platform for OPEN Austin chapter members"`): full chain starting at /office-hours.
+- **Design-doc path** (e.g., `~/.gstack/projects/.../design.md`): chain starts at /autoplan. Per Premise 6, /office-hours is skipped.
+
+If the input is a path that exists on disk and ends in `.md`, treat it as design-doc mode. Otherwise, seed-prompt mode.
+
+## Phase 0: Setup + start gate
+
+### 0.1 Builder slug
+
+```bash
+BUILDER_SLUG="$({{BIN_DIR}}/gstack-config get builder_slug 2>/dev/null || true)"
+if [ -z "$BUILDER_SLUG" ]; then
+  GIT_NAME="$(git config --global user.name 2>/dev/null || true)"
+  if [ -n "$GIT_NAME" ]; then
+    BUILDER_SLUG="$(printf '%s' "$GIT_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//;s/-*$//')"
+  fi
+fi
+```
+
+If `BUILDER_SLUG` is empty after both attempts, AskUserQuestion: "What builder slug should this and future companies live under? (kebab-case [a-z0-9-])". No default.
+
+### 0.2 Company slug
+
+Derive from the seed prompt (or design-doc title) by extracting the first 3-4 meaningful nouns/adjectives, kebab-cased. Examples:
+- `"community platform for OPEN Austin"` → `open-austin-community`
+- `"meal planner for picky eaters"` → `meal-planner-picky-eaters`
+
+Hold the derived slug as `$COMPANY_SLUG`.
+
+If `~/.gstack/builders/$BUILDER_SLUG/companies/$COMPANY_SLUG/` already exists AND it's clearly a different company (different seed/design from what's in `designs/`), AskUserQuestion:
+
+> Slug `$COMPANY_SLUG` already exists for a different company under builder `$BUILDER_SLUG`.
+> A) Pick a new slug — type the new slug in your reply
+> B) Extend the existing one — use the same slug, append a new run
+
+If the slug exists for the SAME company (re-running /build for an existing project), reuse it — append a new run dir under `runs/`.
+
+### 0.3 Mint run_id
+
+```bash
+RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+```
+
+### 0.4 Start gate (mandatory)
+
+AskUserQuestion to confirm setup BEFORE creating any directories or spawning any sub-agents:
+
+> About to start /build:
+>   builder_slug:  $BUILDER_SLUG
+>   company_slug:  $COMPANY_SLUG
+>   run_id:        $RUN_ID
+>   mode:          {seed-prompt | design-doc}
+>   chain:         {/office-hours → } /autoplan → APPROVAL → /implement → /qa → /ship
+>
+> A) Proceed
+> B) Edit slugs (then re-run setup)
+> C) Abort
+
+If A: continue. If B: re-derive with the user's overrides, re-confirm. If C: exit cleanly, no side effects.
+
+If the user picked A AND `BUILDER_SLUG` was just confirmed/typed for the first time, persist it:
+
+```bash
+{{BIN_DIR}}/gstack-config set builder_slug "$BUILDER_SLUG"
+```
+
+### 0.5 Resolve all paths once
+
+```bash
+eval "$({{BIN_DIR}}/gstack-build-step paths \
+  --run-id "$RUN_ID" \
+  --builder-slug "$BUILDER_SLUG" \
+  --company-slug "$COMPANY_SLUG")"
+mkdir -p "$RUN_DIR" "$COMPANY_DIR/designs" "$COMPANY_DIR/plans"
+```
+
+This sets `RUN_DIR`, `COMPANY_DIR`, `BUILDER_DIR`, `DECISIONS_LOG`, `COSTS_LOG`, `LEARNINGS_LOG`, `TIMELINE_LOG`, `SENTINEL_OFFICE_HOURS`, `SENTINEL_AUTOPLAN`, `SENTINEL_IMPLEMENT`, `SENTINEL_QA`, `SENTINEL_SHIP` for use throughout the rest of the skill.
+
+### 0.6 Log start to timeline
+
+```bash
+GSTACK_RUN_ID="$RUN_ID" GSTACK_BUILDER_SLUG="$BUILDER_SLUG" GSTACK_COMPANY_SLUG="$COMPANY_SLUG" \
+  {{BIN_DIR}}/gstack-timeline-log "$(jq -n --arg r "$RUN_ID" --arg b "$BUILDER_SLUG" --arg c "$COMPANY_SLUG" \
+    '{skill:"build", event:"started", run_id:$r, builder_slug:$b, company_slug:$c}')"
+```
+
+Append the start-gate decision to `$DECISIONS_LOG`:
+
+```bash
+echo "$(jq -n --arg r "$RUN_ID" \
+  '{ts: now | todate, gate:"start", choice:"proceed", run_id:$r}')" >> "$DECISIONS_LOG"
+```
+
+## Phase 1: /office-hours (seed-prompt mode only)
+
+Skip this phase entirely if you're in design-doc mode.
+
+In seed-prompt mode, /office-hours is interactive (six forcing questions, premise discovery, two-case validation discussion, etc.). Phase A runs it **in this same parent /build session** rather than spawning a sub-agent — the user is here, the questions need them. (Phase B1 introduces `/office-hours --autonomous` for sub-agent dispatch; not in Phase A scope.)
+
+Read `office-hours/SKILL.md` and follow it with the user's seed prompt as the input. When /office-hours produces a design doc (typical path: `~/.gstack/projects/garrytan-gstack/...-design-...md`), copy it into the company tree:
+
+```bash
+DESIGN_PATH="$RUN_DIR/office-hours-design.md"
+cp "<path /office-hours wrote>" "$DESIGN_PATH"
+cp "$DESIGN_PATH" "$COMPANY_DIR/designs/$(date -u +%Y%m%d-%H%M%S).md"
+```
+
+Then write the office-hours sentinel:
+
+```bash
+jq -n --arg dp "$DESIGN_PATH" --arg ds "<one-paragraph summary of decisions made during /office-hours>" \
+       --arg ctx "<≤500-word handoff: target user, narrowest wedge, key constraints, premises, rejected approaches>" \
+  '{status:"ok", design_doc_path:$dp, decisions_summary:$ds, context_for_next_stage:$ctx}' \
+  | {{BIN_DIR}}/gstack-build-step write-sentinel office-hours \
+      --run-id "$RUN_ID" --builder-slug "$BUILDER_SLUG" --company-slug "$COMPANY_SLUG"
+```
+
+Log:
+```bash
+GSTACK_RUN_ID="$RUN_ID" GSTACK_BUILDER_SLUG="$BUILDER_SLUG" GSTACK_COMPANY_SLUG="$COMPANY_SLUG" \
+  {{BIN_DIR}}/gstack-timeline-log '{"skill":"office-hours","event":"completed","outcome":"success"}'
+```
+
+In design-doc mode, set `DESIGN_PATH` to the path the user gave you and skip the rest of Phase 1.
+
+## Phase 2: /autoplan (spawn-per-stage)
+
+Compose the Agent-tool prompt for /autoplan. The pattern is exactly what Unit 1 spike validated: identifiers as text in the prompt, sentinel path provided, sub-agent writes via gstack-build-step.
+
+```
+Subagent prompt (substitute the bracketed values):
+
+  You are stage 2 (/autoplan) of a /build chain run. Read the design doc at
+  [DESIGN_PATH], then read autoplan/SKILL.md and follow it end-to-end against
+  that design. The CEO/eng/design/DX review skills should run with auto-
+  decisions per the 6 principles in autoplan's SKILL.md.
+
+  Run identifiers (use exactly):
+    run_id:        [RUN_ID]
+    builder_slug:  [BUILDER_SLUG]
+    company_slug:  [COMPANY_SLUG]
+
+  When /autoplan produces a locked plan, save it to:
+    [COMPANY_DIR]/plans/locked-[ISO-DATE].md
+
+  Then write the autoplan sentinel:
+
+    cat <<JSON | [BIN_DIR]/gstack-build-step write-sentinel autoplan \
+        --run-id [RUN_ID] --builder-slug [BUILDER_SLUG] --company-slug [COMPANY_SLUG]
+    {
+      "status": "ok",
+      "plan_path": "<absolute path to the locked plan>",
+      "ac_count": <number of ## Acceptance Criteria entries>,
+      "ac_summary": "<one-line per AC, joined with newlines>",
+      "context_for_next_stage": "<≤500-word handoff: scope locked, ACs counted, anything /implement should know>"
+    }
+    JSON
+
+  Reply with the single word "done" when the sentinel is written.
+```
+
+Dispatch via the Agent tool with `subagent_type: "general-purpose"`. After it returns:
+
+```bash
+AUTOPLAN_RESULT="$({{BIN_DIR}}/gstack-build-step read-sentinel autoplan \
+  --run-id "$RUN_ID" --builder-slug "$BUILDER_SLUG" --company-slug "$COMPANY_SLUG")"
+PLAN_PATH="$(printf '%s' "$AUTOPLAN_RESULT" | jq -r '.plan_path')"
+AC_COUNT="$(printf '%s' "$AUTOPLAN_RESULT" | jq -r '.ac_count')"
+```
+
+Capture the Agent tool's `<usage>` block from the tool result. Append to costs log:
+
+```bash
+echo "$(jq -n --arg r "$RUN_ID" --arg s "autoplan" --argjson tokens <total_tokens> --argjson dur <duration_ms> \
+  '{ts: now | todate, run_id:$r, stage:$s, total_tokens:$tokens, duration_ms:$dur, cost_usd:null}')" \
+  >> "$COSTS_LOG"
+```
+
+Log timeline event with skill="autoplan", event="completed". Note that `gstack-timeline-log` reads the orchestrator env vars and routes the event to `$TIMELINE_LOG` automatically.
+
+If sentinel `.status != "ok"` (e.g., `blocked`), AskUserQuestion: A) retry the /autoplan stage, B) abort the chain, C) hand off to the user. Don't silently proceed.
+
+## Phase 3: APPROVAL GATE (mandatory)
+
+Before /implement, **stop and ask the user**:
+
+> /autoplan is done. Plan locked at: $PLAN_PATH
+> Acceptance Criteria count: $AC_COUNT
+>
+> Brief AC summary:
+> <ac_summary from sentinel>
+>
+> A) Approve and proceed to /implement
+> B) Pause — I want to read the plan first; I'll re-run /build to resume
+> C) Abort the chain
+
+If A: log decision, continue. If B: write a "paused" sentinel summary marker (or just leave the run dir as-is — running /build again with the same company resumes), exit cleanly. If C: log abort decision, exit.
+
+```bash
+echo "$(jq -n --arg r "$RUN_ID" --arg c "<choice A|B|C>" \
+  '{ts: now | todate, gate:"post-autoplan-approval", choice:$c, run_id:$r}')" >> "$DECISIONS_LOG"
+```
+
+This gate is non-negotiable — it's the keystone of "human agency at stage boundaries" (Premise 7).
+
+## Phase 4: /implement (spawn-per-stage)
+
+Cost guardrail: BEFORE spawning, sum costs from `$COSTS_LOG` so far. If `> gstack-config get build_max_cost_warn` (default $20), AskUserQuestion: continue / abort.
+
+Compose the Agent-tool prompt:
+
+```
+You are stage 4 (/implement) of a /build chain run.
+
+Run identifiers (also exported as env vars to your Bash tool — use either):
+  run_id:        [RUN_ID]
+  builder_slug:  [BUILDER_SLUG]
+  company_slug:  [COMPANY_SLUG]
+
+Read implement/SKILL.md and follow it against the locked plan at:
+  [PLAN_PATH]
+
+The skill will write a sentinel via gstack-build-step write-sentinel implement
+when done. Report the sentinel's status field in your reply, then "done".
+```
+
+**Important:** the /implement skill detects orchestrator mode via `GSTACK_RUN_ID`/builder/company env vars. Bash subprocesses inside the Agent tool inherit env from the parent context. Set those env vars in the prompt's instructions so /implement's `if [ -n "${GSTACK_RUN_ID:-}" ]` check succeeds:
+
+Actually — env vars don't auto-propagate across the Agent boundary. Tell the sub-agent to set them at the top of its bash work:
+
+```bash
+export GSTACK_RUN_ID=[RUN_ID]
+export GSTACK_BUILDER_SLUG=[BUILDER_SLUG]
+export GSTACK_COMPANY_SLUG=[COMPANY_SLUG]
+```
+
+Add that as the FIRST instruction in the sub-agent's prompt for every spawned stage from here on.
+
+Dispatch. After the sub-agent returns:
+
+```bash
+IMPLEMENT_RESULT="$({{BIN_DIR}}/gstack-build-step read-sentinel implement \
+  --run-id "$RUN_ID" --builder-slug "$BUILDER_SLUG" --company-slug "$COMPANY_SLUG")"
+IMPLEMENT_STATUS="$(printf '%s' "$IMPLEMENT_RESULT" | jq -r '.status')"
+```
+
+If `status: ok` → continue. If `status: blocked` → AskUserQuestion: A) re-spawn /implement (it'll resume from checkpoint), B) abort, C) hand off.
+
+Append cost. Log timeline event.
+
+## Phase 5: /qa (spawn-per-stage)
+
+Same shape as Phase 4. Subagent prompt:
+
+```
+You are stage 5 (/qa) of a /build chain run. Set the orchestrator env vars
+first:
+  export GSTACK_RUN_ID=[RUN_ID]
+  export GSTACK_BUILDER_SLUG=[BUILDER_SLUG]
+  export GSTACK_COMPANY_SLUG=[COMPANY_SLUG]
+
+Read qa/SKILL.md and run /qa against the work just landed by /implement.
+The most-recent commits are visible via `git log -[ac_count]`. If the work
+involves a deployable URL, /qa will detect it from CLAUDE.md or ask;
+otherwise it runs the test-suite-only path.
+
+When done, write the qa sentinel via gstack-build-step write-sentinel qa with:
+  status, report_path, bugs_found, bugs_fixed, ship_ready, context_for_next_stage
+
+Reply "done" when the sentinel is written.
+```
+
+Read sentinel, append cost, log event. If `ship_ready: false`, AskUserQuestion: continue-to-ship-anyway / pause / abort.
+
+## Phase 6: /ship (spawn-per-stage)
+
+Subagent prompt:
+
+```
+You are stage 6 (/ship, terminal) of a /build chain run. Set the orchestrator
+env vars first:
+  export GSTACK_RUN_ID=[RUN_ID]
+  export GSTACK_BUILDER_SLUG=[BUILDER_SLUG]
+  export GSTACK_COMPANY_SLUG=[COMPANY_SLUG]
+
+Read ship/SKILL.md and run it. Stop after PR creation — do NOT merge.
+
+When the PR exists, write the ship sentinel via gstack-build-step write-sentinel
+ship with: status, pr_url, version_tag, commit_sha.
+
+Reply "done" when the sentinel is written.
+```
+
+Read the ship sentinel. /build's terminal output is the PR URL.
+
+## Phase 7: Final summary
+
+Print to the user:
+
+```
+/build complete.
+
+  builder/company:  $BUILDER_SLUG/$COMPANY_SLUG
+  run_id:           $RUN_ID
+  run dir:          $RUN_DIR
+  stages:           office-hours[Y|N], autoplan, implement, qa, ship
+  PR URL:           <pr_url from ship sentinel>
+  total cost:       $<sum of cost_usd from costs.jsonl, or "tokens-only"
+                     if cost not computable from Agent tool usage>
+  total time:       <sum of duration_ms / 1000 / 60> min
+  decisions:        $DECISIONS_LOG
+  full timeline:    gstack-dashboard show --company $COMPANY_SLUG
+```
+
+Log the final event:
+
+```bash
+GSTACK_RUN_ID="$RUN_ID" GSTACK_BUILDER_SLUG="$BUILDER_SLUG" GSTACK_COMPANY_SLUG="$COMPANY_SLUG" \
+  {{BIN_DIR}}/gstack-timeline-log '{"skill":"build","event":"completed","outcome":"success"}'
+```
+
+## Context-window discipline
+
+Between Phase 2 and Phase 3, between Phase 4 and Phase 5, AND any other point you notice your context approaching its limit, pause and run `/context-save` (read `context-save/SKILL.md` and follow it). The sentinel files are durable; your in-memory state is not. After /context-save, you can restore via `/context-restore` and pick up at the next phase, or the user can re-run /build with the same company slug to resume from sentinels.
+
+## Hard rules
+
+- **Always pass the start gate.** Phase 0.4 cannot be skipped, even with --yes flags. The user has to confirm slugs.
+- **Always pass the post-/autoplan approval gate.** Phase 3 is non-negotiable.
+- **Never auto-merge a PR.** /ship stops at PR creation; /land-and-deploy is a separate skill.
+- **Never silently truncate the chain.** If a stage's sentinel says `blocked`, AskUserQuestion before continuing.
+- **Never re-run /office-hours non-interactively.** Phase A runs it in the parent session. Phase B1 has `--autonomous`.
+- **Never write outside `~/.gstack/builders/$BUILDER/companies/$COMPANY/`** for orchestrator artifacts. The slug validation in `gstack-build-step` enforces this; trust it.
+
+## Scope NOT in /build (Phase A)
+
+| Not /build's job | Whose job |
+|---|---|
+| Marketing copy | /marketing-landing (Phase B1) |
+| Feedback ingestion | /feedback-triage (Phase B1) |
+| Autonomous /office-hours | /office-hours --autonomous (Phase B1) |
+| Multi-LLM provider routing | LiteLLM proxy or thin shim (Phase B3) |
+| Web command center | (Phase B2) |
+| Deploy to production | /land-and-deploy (Phase A.5 chain extension) |
+| Auto-merge PRs | explicitly rejected |
+
+If the user asks for any of these, say so plainly and point them at the right skill or phase.
+
+{{LEARNINGS_LOG}}
+
+## Examples
+
+**User:** `/build "an AI-managed community platform for OPEN Austin chapter members"`
+
+→ Seed-prompt mode. Phase 0 derives `open-austin-community`. Phase 0.4 confirms slugs at start gate. Phase 1 runs /office-hours interactively. Phase 2 spawns /autoplan. Phase 3 approval gate. Phases 4-6 spawn /implement, /qa, /ship. Phase 7 prints PR URL.
+
+**User:** `/build ~/.gstack/projects/garrytan-gstack/speetch_ai-office-hours-implement-design-20260426-233309.md`
+
+→ Design-doc mode (path exists, ends in .md). Phase 0 derives `office-hours-implement-design` from the filename. Phase 1 SKIPPED. Phase 2 spawns /autoplan against the existing doc. Rest as normal.
+
+**User:** `/build` (no arguments)
+
+→ AskUserQuestion: A) seed prompt, B) design-doc path. Then proceed with the answer.
+
+**Sub-agent dispatch failure** (e.g., Agent tool returns no output, or sentinel.status != "ok"):
+
+→ AskUserQuestion: rerun-this-stage / skip-and-continue / abort-chain / hand-off-to-user. Decisions logged. The sentinel files remain — re-running /build with the same `RUN_ID` (passed via `--resume <run_id>` flag) resumes from where you stopped.
