@@ -327,6 +327,32 @@ If the repo has a `TODOS.md`:
 
 ---
 
+## Phase 12: Orchestrator sentinel emission (env-gated)
+
+When `/qa` is invoked from the `/build` chain (orchestrator mode), the parent `/build` session needs a structured handoff to decide whether to continue to `/ship`. Detect via env vars and emit. When NOT in orchestrator mode, this entire phase is a no-op — `/qa` behavior is byte-for-byte unchanged.
+
+```bash
+if [ -n "${GSTACK_RUN_ID:-}" ] && [ -n "${GSTACK_BUILDER_SLUG:-}" ] && [ -n "${GSTACK_COMPANY_SLUG:-}" ]; then
+  cat <<JSON | {{BIN_DIR}}/gstack-build-step write-sentinel qa \
+    --run-id "$GSTACK_RUN_ID" \
+    --builder-slug "$GSTACK_BUILDER_SLUG" \
+    --company-slug "$GSTACK_COMPANY_SLUG"
+{
+  "status": "ok",
+  "report_path": "<absolute path to the QA report — Phase 10's output>",
+  "bugs_found": <integer count of issues found>,
+  "bugs_fixed": <integer count of fixes applied + verified>,
+  "ship_ready": <true if no critical/high bugs remain unfixed; false otherwise>,
+  "context_for_next_stage": "<≤500-word handoff for /ship: what changed in the fix loop, which areas had bugs, what /ship should re-verify, any deferred bugs that should NOT block ship>"
+}
+JSON
+fi
+```
+
+If `ship_ready=false`, /build's Phase 5 will surface this via AskUserQuestion before continuing to /ship. Do NOT lie about ship-readiness to make the chain proceed — the human reviews the answer.
+
+---
+
 {{LEARNINGS_LOG}}
 
 {{GBRAIN_SAVE_RESULTS}}

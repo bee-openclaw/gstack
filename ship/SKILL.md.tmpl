@@ -912,6 +912,30 @@ This step is automatic — never skip it, never ask for confirmation.
 
 ---
 
+## Step N+1: Orchestrator sentinel emission (env-gated)
+
+When `/ship` is invoked from the `/build` chain (orchestrator mode), the parent /build session reads the PR URL + version tag + commit SHA from a sentinel file. Detect via env vars and emit. When NOT in orchestrator mode, this entire step is a no-op — `/ship` behavior is byte-for-byte unchanged.
+
+```bash
+if [ -n "${GSTACK_RUN_ID:-}" ] && [ -n "${GSTACK_BUILDER_SLUG:-}" ] && [ -n "${GSTACK_COMPANY_SLUG:-}" ]; then
+  cat <<JSON | {{BIN_DIR}}/gstack-build-step write-sentinel ship \
+    --run-id "$GSTACK_RUN_ID" \
+    --builder-slug "$GSTACK_BUILDER_SLUG" \
+    --company-slug "$GSTACK_COMPANY_SLUG"
+{
+  "status": "ok",
+  "pr_url": "<URL from gh pr create / gh pr view>",
+  "version_tag": "<contents of VERSION file at the time of the ship commit>",
+  "commit_sha": "<git rev-parse HEAD>"
+}
+JSON
+fi
+```
+
+This step is automatic — never skip it when env vars are set, never emit it when env vars are unset. /ship is the terminal stage of /build, so the sentinel does not include `context_for_next_stage`.
+
+---
+
 ## Important Rules
 
 - **Never skip tests.** If tests fail, stop.
