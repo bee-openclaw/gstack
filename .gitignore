@@ -4,7 +4,13 @@ dist/
 browse/dist/
 design/dist/
 make-pdf/dist/
+# Compiled Bun binaries (Mach-O arm64 only; ./setup rebuilds per platform).
+# Source lives alongside as <name>.ts. Add new entries here when the build
+# script in package.json adds new `bun build --compile` targets.
 bin/gstack-global-discover
+bin/gstack-build-step
+bin/gstack-dashboard
+bin/gstack-companies-export
 .gstack/
 .claude/skills/
 .claude/scheduled_tasks.lock

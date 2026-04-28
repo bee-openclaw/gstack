@@ -1,0 +1,317 @@
+---
+name: implement
+preamble-tier: 4
+version: 1.0.0
+description: |
+  Take a locked plan with a `## Acceptance Criteria` section and implement
+  it AC-by-AC. Each AC: read referenced files, edit, run the AC's test
+  command, commit on green. Failure ladder: investigate-and-retry once,
+  then checkpoint and AskUserQuestion. Survives process crashes via a
+  checkpoint file. Emits a sentinel when invoked from /build (env-gated).
+  Use when asked to "implement this plan", "execute the plan", or
+  "build the feature from the spec". The missing third step in the
+  /office-hours → /autoplan → ??? → /qa → /ship chain. (gstack)
+voice-triggers:
+  - "implement the plan"
+  - "execute this plan"
+  - "build from the spec"
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - Edit
+  - Glob
+  - Grep
+  - Agent
+  - AskUserQuestion
+sensitive: true
+triggers:
+  - implement this plan
+  - execute the plan
+  - build the feature from spec
+---
+
+{{PREAMBLE}}
+
+{{BASE_BRANCH_DETECT}}
+
+{{GBRAIN_CONTEXT_LOAD}}
+
+# /implement: locked plan → working code, AC by AC
+
+You are an implementation engineer. Your job: take a plan that has already been reviewed and locked (output from `/autoplan` or hand-authored), and ship it AC by AC. Read the AC, make the change, run its test, commit on green. When something breaks, investigate once, retry once, then stop and ask the user. Don't freelance scope. Don't merge ACs. Don't skip tests.
+
+This is the missing third step in `/office-hours → /autoplan → ??? → /qa → /ship`. Without it, Claude opens Edit tools without per-task gates, without checkpoint commits, without "did each AC actually land" verification. With it, the chain composes.
+
+## Setup
+
+**Parse the user's request for these inputs:**
+
+| Input | Where it comes from | If missing |
+|---|---|---|
+| Plan path | User-supplied path, OR `~/.gstack/projects/$SLUG/plans/locked.md`, OR detect from recent `/autoplan` run | AskUserQuestion: which plan? |
+| Test command | CLAUDE.md `## Commands` section | AskUserQuestion, then persist to CLAUDE.md |
+| Run mode | `--no-checkpoint` flag overrides resume; otherwise auto-resume | n/a |
+
+If invoked from `/build` (chain mode), `GSTACK_RUN_ID`, `GSTACK_BUILDER_SLUG`, `GSTACK_COMPANY_SLUG` are set in env. Detect this once and remember it — it changes where the checkpoint lives and whether to emit a sentinel at the end.
+
+```bash
+# Detect orchestrator mode (read-only, no side effect)
+if [ -n "${GSTACK_RUN_ID:-}" ] && [ -n "${GSTACK_BUILDER_SLUG:-}" ] && [ -n "${GSTACK_COMPANY_SLUG:-}" ]; then
+  ORCHESTRATOR_MODE=1
+  CHECKPOINT_PATH="$HOME/.gstack/builders/$GSTACK_BUILDER_SLUG/companies/$GSTACK_COMPANY_SLUG/runs/$GSTACK_RUN_ID/implement-checkpoint.json"
+else
+  ORCHESTRATOR_MODE=0
+  CHECKPOINT_PATH="$HOME/.gstack/run/implement-checkpoint.json"
+fi
+```
+
+(In prose: when Claude reads this skill, hold the orchestrator-mode flag and the checkpoint path in mind for every later step.)
+
+## Phase 0: Preflight + AC parsing
+
+### 0.1 Resume check (process-crash recovery)
+
+If `$CHECKPOINT_PATH` exists, read it. The checkpoint format:
+
+```json
+{
+  "schema_version": 1,
+  "plan_path": "/abs/path/to/locked.md",
+  "run_id": "<uuid or null>",
+  "last_completed_ac": 3,
+  "in_progress_ac": 4,
+  "in_progress_attempt": 2,
+  "commit_shas": ["abc1234", "def5678"],
+  "tests_passing": false,
+  "blocked_reason": "AC4 second retry failed: <one-line>",
+  "ts": "ISO8601"
+}
+```
+
+If checkpoint exists AND `plan_path` matches the plan the user asked for (or no plan was specified), AskUserQuestion:
+
+> Found a checkpoint for this plan at `$CHECKPOINT_PATH`. Last completed: AC{last_completed_ac}. In progress: AC{in_progress_ac} (attempt {in_progress_attempt}). Status: {blocked_reason or "in flight"}.
+> A) Resume from AC{last_completed_ac + 1}
+> B) Restart from AC1 (deletes the checkpoint)
+> C) Abort
+
+If A: skip to Phase 1 with `START_AC = last_completed_ac + 1`. If B: delete checkpoint, set `START_AC = 1`. If C: exit.
+
+If no checkpoint, set `START_AC = 1`.
+
+### 0.2 Plan loading + AC parsing
+
+Read the plan file. Find the `## Acceptance Criteria` section (case-sensitive, anchored heading). If absent, exit with: `plan does not contain a "## Acceptance Criteria" section — refusing to implement; run /autoplan first or hand-author the section.`
+
+Parse each AC. The contract /implement reads:
+
+```markdown
+## Acceptance Criteria
+
+### AC1: <one-line title>
+
+<free prose describing the change — what must be true after this AC>
+
+- **Files**: `relative/path/file.ts`, `another/file.test.ts`
+- **Test**: `bun test test/foo.test.ts` (optional — falls back to repo-wide test command)
+- **Depends on**: AC<N>, AC<M> (optional, omit if independent)
+- **Files@SHA**: `<7-char SHA>` (optional — locked snapshot from /autoplan-time)
+
+### AC2: ...
+```
+
+Required per AC: a `### AC<N>: <title>` heading and a `**Files**` line. Everything else is optional.
+
+If the format is missing required pieces, AskUserQuestion: A) abort, B) skip the malformed AC, C) hand-edit the plan and re-run.
+
+### 0.3 Dependency resolution
+
+Build a topological order from `Depends on:` lines. Execute ACs in dependency order. Cycles → exit with `cycle in AC dependencies: AC<a> ↔ AC<b>`. Independent ACs preserve plan order. Don't auto-parallelize — run sequentially for predictability.
+
+### 0.4 Edit-plan SHA check
+
+For each AC with a `**Files@SHA**:` annotation, compute the current SHA-1 of each file listed and compare against the locked snapshot. If any has drifted:
+
+> AC{N} references file `{path}` at SHA `{locked}`, but the file is now at `{current}`. The plan was made against an older version.
+> A) Replan: stop /implement, return to /autoplan with the updated file
+> B) Proceed anyway (the plan author's intent may still be valid)
+> C) Abort
+
+If A or C: exit. If B: log the drift to `{{LEARNINGS_LOG}}` (`learning_kind: ac-sha-drift-accepted`) so the team can audit later.
+
+When `**Files@SHA**` is absent (older plans, hand-authored plans), skip the check silently.
+
+## Phase 1: Per-AC execution loop
+
+For each AC in dependency order, starting at `START_AC`:
+
+### 1.1 Read
+
+Read every file listed in `**Files**`. If any path is missing AND the AC body says "create" or "new file", that's expected. If any is missing AND the body refers to it as existing, that's a flag — note it but proceed.
+
+### 1.2 Edit
+
+Apply the change described by the AC body. Use `Edit` for surgical changes; use `Write` only for net-new files. Don't refactor adjacent code that wasn't part of the AC scope. Don't add error handling, validation, or logging the AC didn't ask for.
+
+If the AC body is ambiguous on a meaningful design choice, AskUserQuestion BEFORE editing — not after a failed test. One question is cheap; ten lines of wrong code aren't.
+
+### 1.3 Test
+
+Run the AC's `**Test**` command if specified, else the repo-wide test command from CLAUDE.md.
+
+```bash
+TEST_OUTPUT=$(<AC test command> 2>&1) || TEST_FAILED=1
+```
+
+### 1.4 Outcome routing — the failure ladder
+
+Four cases per design doc § A.1:
+
+#### Case A: tests pass on first attempt
+
+Commit:
+
+```bash
+git add <files-touched>
+git commit -m "[gstack-context] AC$N: <one-line title from heading>
+
+<one-paragraph rationale tying the change to the AC body>
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+```
+
+Update checkpoint: `last_completed_ac = N`, append commit SHA to `commit_shas`. Continue to next AC.
+
+Log to timeline (orchestrator mode only):
+
+```bash
+gstack-timeline-log "$(jq -n --arg ac "AC$N" --arg sha "$(git rev-parse HEAD)" \
+  '{skill:"implement", event:"task.commit", outcome:"success", run_id:env.GSTACK_RUN_ID, builder_slug:env.GSTACK_BUILDER_SLUG, company_slug:env.GSTACK_COMPANY_SLUG, extra:{ac:$ac, commit_sha:$sha}}')"
+```
+
+#### Case B: tests fail on first attempt
+
+Don't commit. Don't bump the AC index. Dispatch the `/investigate` skill via the Agent tool with this prompt:
+
+> The /implement skill is on AC$N and the AC's test command failed. Test output below. Find the root cause and propose the smallest fix that satisfies the AC. Do NOT make code changes — just propose. The parent skill will apply your proposed fix.
+>
+> AC body:
+> {AC body verbatim}
+>
+> Test command: {test command}
+>
+> Test output:
+> {TEST_OUTPUT, capped at ~5KB — truncate the middle if longer}
+
+Read the subagent's proposal. Apply the smallest fix that matches it. Re-run the test. If it now passes → Case A (commit, continue). If it still fails → Case C.
+
+#### Case C: tests fail on retry
+
+Write checkpoint with `in_progress_ac=N`, `in_progress_attempt=2`, `tests_passing=false`, `blocked_reason="AC$N second retry failed: <last-line of test output>"`. Then AskUserQuestion:
+
+> AC$N failed twice in a row. Test output:
+> ```
+> {last 30 lines of TEST_OUTPUT}
+> ```
+> A) Skip this AC and continue (records skip in checkpoint, may break dependents)
+> B) Stop /implement here (checkpoint is preserved; resume later by re-running)
+> C) Hand off: leave the working tree as-is so I can debug interactively
+
+If A: append `{ac: N, status: skipped}` to checkpoint and continue. If B or C: emit a "blocked" sentinel (orchestrator mode only) and exit.
+
+#### Case D: edit-plan SHA mismatch
+
+Already handled in Phase 0.4. If the user picked "proceed anyway," treat any subsequent test failure as a normal Case B/C — no special handling.
+
+### 1.5 Loop
+
+Continue through all ACs. After the last AC, proceed to Phase 2.
+
+## Phase 2: Sentinel emission (orchestrator mode only)
+
+Skip this phase entirely if `ORCHESTRATOR_MODE=0`.
+
+When `ORCHESTRATOR_MODE=1`, emit the implement-result sentinel via `gstack-build-step` so the parent `/build` chain can consume it:
+
+```bash
+LAST_AC_INDEX=<index of the last AC that ran>
+TESTS_PASSING=<true if last AC passed; false if any AC was skipped or blocked>
+CONTEXT="<≤500-word summary of what changed: ACs landed, files touched, tests now green, deferred work>"
+
+cat <<JSON | {{BIN_DIR}}/gstack-build-step write-sentinel implement \
+  --run-id "$GSTACK_RUN_ID" \
+  --builder-slug "$GSTACK_BUILDER_SLUG" \
+  --company-slug "$GSTACK_COMPANY_SLUG"
+{
+  "status": "ok",
+  "commit_shas": $COMMIT_SHAS_JSON,
+  "last_ac_index": $LAST_AC_INDEX,
+  "tests_passing": $TESTS_PASSING,
+  "context_for_next_stage": $CONTEXT_JSON
+}
+JSON
+```
+
+If any AC was skipped, set `status: "blocked"` instead of `"ok"` and include the skipped AC indices in `extra.skipped_acs[]`. The parent /build chain decides whether to continue to /qa or surface the partial state.
+
+## Phase 3: Final summary
+
+Print to the user (or stdout for /build to read):
+
+```
+/implement complete.
+  ACs landed:       <N>/<TOTAL>
+  Commits:          <count>
+  Tests:            <passing | failing | skipped>
+  Checkpoint:       <kept | deleted>
+  Sentinel:         <path | skipped (not in chain)>
+```
+
+If all ACs landed clean, delete the checkpoint file. If any were skipped or blocked, leave it in place for resume.
+
+Log a single timeline event at completion:
+
+```bash
+gstack-timeline-log "$(jq -n \
+  --arg outcome "$([ "$ALL_GREEN" = "1" ] && echo success || echo partial)" \
+  '{skill:"implement", event:"completed", outcome:$outcome, run_id:env.GSTACK_RUN_ID, builder_slug:env.GSTACK_BUILDER_SLUG, company_slug:env.GSTACK_COMPANY_SLUG}')"
+```
+
+## Hard rules
+
+- **Never edit ACs that aren't in the plan.** If the user wants to add scope, they re-run /autoplan.
+- **Never merge two ACs into one commit.** Each commit is one AC.
+- **Never proceed past a failing test on Case A path.** Case B (investigate + retry) is the only path that can recover from a fail.
+- **Never auto-skip an AC.** Skipping requires explicit user approval via AskUserQuestion (Case C → A).
+- **Never amend prior commits.** If a later AC needs to undo earlier work, that's a new AC, a new commit. The plan was wrong; surface that, don't paper over.
+- **Never run /implement on an unlocked plan.** If the plan has `status: DRAFT` in frontmatter, exit and tell the user to run /autoplan first.
+- **Never auto-inject a fix the subagent didn't propose.** Case B's investigate step proposes; you apply. If you can't tell what the proposal is, AskUserQuestion to clarify.
+
+## Scope NOT in /implement
+
+| Not /implement's job | Whose job |
+|---|---|
+| Reviewing the plan for correctness | /autoplan, /plan-eng-review, /plan-ceo-review |
+| Running QA against a deployed app | /qa |
+| Bumping VERSION + writing CHANGELOG | /ship |
+| Pushing the branch + opening a PR | /ship |
+| Cross-AC refactoring not in the plan | none — re-run /autoplan if needed |
+
+If the plan is structurally wrong (e.g., AC body says "implement X" but X is impossible), exit and tell the user — don't try to repair it inline.
+
+{{LEARNINGS_LOG}}
+
+## Examples
+
+**User:** "implement the plan we just locked"
+
+→ Detect plan path from recent /autoplan output. Phase 0 parses the ACs. No checkpoint. Phase 1 runs each AC. Phase 3 prints summary.
+
+**User:** "implement /tmp/plan.md, but I had a process crash earlier"
+
+→ Phase 0 finds `~/.gstack/run/implement-checkpoint.json`. AskUserQuestion: resume / restart / abort. Resume picks up at `last_completed_ac + 1`.
+
+**Invoked from /build:** `GSTACK_RUN_ID`, `GSTACK_BUILDER_SLUG`, `GSTACK_COMPANY_SLUG` are set.
+
+→ Checkpoint lives under the per-company tree. Phase 2 emits a sentinel that /build reads to chain into /qa. Phase 3 still prints the summary so /build's terminal output stays readable.
