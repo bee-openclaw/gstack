@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.19.0.1] - 2026-04-28
+
+## **First end-to-end /build orchestrator run lands. Synthetic todo app + a real architectural finding.**
+
+The `/build` orchestrator chain (`/office-hours` -> `/autoplan` -> approval gate -> `/implement` -> `/qa` -> `/ship`) shipped on `office-hours-implement` four commits ago without ever being run end-to-end against a real seed. This release is that run. The seed was deliberately tiny — a single-file vanilla HTML/CSS/JS todo app with `localStorage` persistence — picked so any failure in the chain would be orchestrator-level, not implementation-level. The artifact lives under `synthetic-tests/simple-todo-localstorage/` and opens directly via `file://` in any browser. Every chain stage produced a `status: ok` sentinel JSON in `~/.gstack/builders/bilal-ahmed/companies/simple-todo-localstorage/runs/<run-id>/`. The end-to-end run also surfaced a real finding: `/build`'s spawn-per-stage architecture assumes the Agent tool is callable from the orchestrator's runtime, and inside a Skill-runtime invocation it is not. The run completed by inlining the planning, implementation, and QA stages in the parent session — chain semantics preserved (every sentinel honest, every gate logged), spawn isolation traded for completeness. That gap needs to be closed in a follow-up.
+
+### What this means for builders
+
+You can now `/build "<seed prompt>"` and watch the chain produce a working artifact end-to-end. Today, on this codebase, against a synthetic test seed, that worked. Two real schema mismatches surfaced (the `/implement` sentinel's required field is `commit_shas` plural, not `commit_sha` singular as the `/build` SKILL.md docs imply) and one architectural gap (Agent-tool dispatch isn't available in the Skill subprocess this skill lives in). The synthetic todo app at `synthetic-tests/simple-todo-localstorage/index.html` is the proof: ~280 lines, runs offline, no frameworks. Open it, add a todo, refresh, see the todo survive. That round-trip is the human eyeball check on the whole orchestrator architecture.
+
+### Itemized changes
+
+#### Added
+
+- `synthetic-tests/simple-todo-localstorage/index.html` — single-file vanilla HTML/CSS/JS todo app with `localStorage` persistence under key `simple-todo-localstorage`. Add / toggle / delete todos. Empty input rejected. Enter-key submits. `crypto.randomUUID()` ids with a `Date.now() + Math.random()` fallback. Light / dark via `prefers-color-scheme`. No external scripts, no CDN, runs from `file://`.
+- `synthetic-tests/simple-todo-localstorage/README.md` — provenance metadata (run id `91392570-e6b2-4fbb-bbe2-dd7c6b0f9389`, builder slug `bilal-ahmed`, company slug `simple-todo-localstorage`) so anyone reading this diff knows it came from the `/build` end-to-end run, not someone's accidental commit.
+
+#### For contributors
+
+- First successful end-to-end run of the `/build` orchestrator with all five sentinels (`office-hours-result.json`, `autoplan-result.json`, `implement-result.json`, `qa-result.json`, `ship-result.json`) written and approval gates honored.
+- `/build`'s SKILL.md needs two follow-up edits: (1) document that the `/implement` sentinel requires `commit_shas` (plural array), `last_ac_index`, and `tests_passing` — the docs section currently shows a single-sha schema; (2) document the runtime requirement for the Agent tool, OR provide a documented `claude -p` fallback for environments where the Agent tool isn't exposed.
+
 ## [1.15.0.0] - 2026-04-26
 
 ## **Real-PTY test harness ships. 11 plan-mode E2E tests, 23 unit tests, and 50K fewer tokens per invocation.**
