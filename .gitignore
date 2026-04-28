@@ -42,3 +42,7 @@ supabase/.temp/
 
 # Throughput analysis — local-only, regenerate via scripts/garry-output-comparison.ts
 docs/throughput-*.json
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
