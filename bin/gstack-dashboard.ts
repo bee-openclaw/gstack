@@ -301,6 +301,8 @@ function die(msg: string): never {
 }
 function usage(): never {
   process.stderr.write([
+    'gstack-dashboard — terminal viewer for orchestrator + project timelines',
+    '',
     'usage:',
     '  gstack-dashboard tail      [--builder <s>] [--company <s>] [-n <lines>]',
     '  gstack-dashboard builders',
