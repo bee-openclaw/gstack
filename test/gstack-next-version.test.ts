@@ -153,30 +153,34 @@ describe("markActiveSiblings", () => {
 // Integration smoke — only runs if gh is available and authenticated. Confirms
 // the CLI executes end-to-end against real APIs without crashing.
 describe("integration (smoke)", () => {
-  test("CLI runs against real repo and emits parseable JSON", async () => {
-    const proc = Bun.spawnSync([
-      "bun",
-      "run",
-      "./bin/gstack-next-version",
-      "--base",
-      "main",
-      "--bump",
-      "patch",
-      "--current-version",
-      "1.6.3.0",
-      "--workspace-root",
-      "null", // skip sibling scan in CI
-    ]);
-    const out = new TextDecoder().decode(proc.stdout);
-    const parsed = JSON.parse(out);
-    expect(parsed).toHaveProperty("version");
-    expect(parseVersion(parsed.version)).not.toBeNull();
-    expect(parsed).toHaveProperty("bump", "patch");
-    expect(parsed).toHaveProperty("host");
-    expect(["github", "gitlab", "unknown"]).toContain(parsed.host);
-    expect(parsed).toHaveProperty("claimed");
-    expect(Array.isArray(parsed.claimed)).toBe(true);
-    expect(parsed).toHaveProperty("siblings");
-    expect(parsed.siblings).toEqual([]); // --workspace-root null disabled scanning
-  });
+  test(
+    "CLI runs against real repo and emits parseable JSON",
+    async () => {
+      const proc = Bun.spawnSync([
+        "bun",
+        "run",
+        "./bin/gstack-next-version",
+        "--base",
+        "main",
+        "--bump",
+        "patch",
+        "--current-version",
+        "1.6.3.0",
+        "--workspace-root",
+        "null", // skip sibling scan in CI
+      ]);
+      const out = new TextDecoder().decode(proc.stdout);
+      const parsed = JSON.parse(out);
+      expect(parsed).toHaveProperty("version");
+      expect(parseVersion(parsed.version)).not.toBeNull();
+      expect(parsed).toHaveProperty("bump", "patch");
+      expect(parsed).toHaveProperty("host");
+      expect(["github", "gitlab", "unknown"]).toContain(parsed.host);
+      expect(parsed).toHaveProperty("claimed");
+      expect(Array.isArray(parsed.claimed)).toBe(true);
+      expect(parsed).toHaveProperty("siblings");
+      expect(parsed.siblings).toEqual([]); // --workspace-root null disabled scanning
+    },
+    30_000, // bun-test default is 5s; gh API call typically takes 4-5s, push over
+  );
 });

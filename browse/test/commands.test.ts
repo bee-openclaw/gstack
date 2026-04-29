@@ -5,7 +5,7 @@
  * A real browse server is started and commands are sent via the CLI HTTP interface.
  */
 
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test';
 import { startTestServer } from './test-server';
 import { BrowserManager } from '../src/browser-manager';
 import { resolveServerScript } from '../src/cli';
@@ -76,7 +76,10 @@ describe('Navigation', () => {
 // ─── Content Extraction ─────────────────────────────────────────
 
 describe('Content extraction', () => {
-  beforeAll(async () => {
+  // beforeEach (not beforeAll): the prior Navigation block leaves the browser
+  // on forms.html, and a `beforeAll` goto here can race with that final state,
+  // leaving early Content extraction tests reading forms.html content.
+  beforeEach(async () => {
     await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
   });
 
