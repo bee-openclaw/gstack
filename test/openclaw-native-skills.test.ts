@@ -18,18 +18,33 @@ function extractFrontmatter(content: string): string {
   return content.slice(4, fmEnd);
 }
 
+function parseFlatFrontmatter(frontmatter: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const raw of frontmatter.split('\n')) {
+    const line = raw.trimEnd();
+    if (line === '') continue;
+    const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_-]*):\s*(.*)$/);
+    if (!m) throw new Error(`malformed frontmatter line: ${line}`);
+    let value = m[2];
+    if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
+    else if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
+    out[m[1]] = value;
+  }
+  return out;
+}
+
 describe('OpenClaw native skills', () => {
   test('frontmatter parses as YAML and keeps only name + description', () => {
     for (const skill of OPENCLAW_NATIVE_SKILLS) {
       const content = fs.readFileSync(path.join(ROOT, skill), 'utf-8');
       const frontmatter = extractFrontmatter(content);
-      const parsed = Bun.YAML.parse(frontmatter) as Record<string, unknown>;
+      const parsed = parseFlatFrontmatter(frontmatter);
 
       expect(Object.keys(parsed).sort()).toEqual(['description', 'name']);
       expect(typeof parsed.name).toBe('string');
       expect(typeof parsed.description).toBe('string');
-      expect((parsed.name as string).length).toBeGreaterThan(0);
-      expect((parsed.description as string).length).toBeGreaterThan(0);
+      expect(parsed.name.length).toBeGreaterThan(0);
+      expect(parsed.description.length).toBeGreaterThan(0);
     }
   });
 });
