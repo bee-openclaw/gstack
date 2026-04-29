@@ -58,6 +58,31 @@ If the input is a path that exists on disk and ends in `.md`, treat it as design
 
 ## Phase 0: Setup + start gate
 
+### 0.0 Agent-tool availability check (mandatory hard-fail)
+
+Before anything else — before deriving slugs, before AskUserQuestion, before touching disk — verify the **Agent tool is available in your tool list**. The Agent tool is the spawn-per-stage mechanism (Premise 5); without it, /build cannot do what it claims to do, and falling back to inline execution silently corrupts dogfood signal (the run looks like spawn-per-stage in logs but isn't).
+
+Check your own tool list. If "Agent" is NOT present:
+
+1. **Hard-fail.** Print the following message verbatim and exit, no side effects, no sentinel files written:
+
+   > /build requires the Agent tool to spawn sub-agents per stage (Premise 5). The Agent tool is not available in this session. Refusing to run — silent inline-fallback would corrupt dogfood signal and violate the spawn-per-stage architecture.
+   >
+   > Options:
+   >   1. Re-invoke /build from a session/host where the Agent tool is enabled (Claude Code with default tools).
+   >   2. If you genuinely want inline execution (single-session, no spawn isolation, no per-stage cost accounting), pass `--allow-inline` explicitly. The chain will still run but every stage executes in this same context window. NOT recommended for dogfood runs — Phase A.5 results will be invalid.
+
+2. If the user re-invokes with `--allow-inline`, set `INLINE_MODE=true` and proceed. Add a banner to the final summary: `mode: INLINE (Agent tool unavailable, spawn-per-stage disabled)`. Skip cost accumulation per stage; no Agent-tool `<usage>` blocks exist in inline mode.
+
+3. Log the check result to `$DECISIONS_LOG` after Phase 0.5 resolves paths:
+
+   ```bash
+   echo "$(jq -n --arg r "$RUN_ID" --arg m "<spawn|inline>" \
+     '{ts: now | todate, gate:"agent-tool-check", mode:$m, run_id:$r}')" >> "$DECISIONS_LOG"
+   ```
+
+This check exists because of v1.19.0.1's first end-to-end run: the Agent tool was unavailable in the skill-runtime context and /build silently degraded to inline. The run "succeeded" but didn't validate the architecture. Hard-fail is the only safe default.
+
 ### 0.1 Builder slug
 
 ```bash
@@ -378,6 +403,7 @@ Between Phase 2 and Phase 3, between Phase 4 and Phase 5, AND any other point yo
 
 ## Hard rules
 
+- **Always verify the Agent tool exists before any side effects.** Phase 0.0 is non-negotiable. Inline-fallback only happens with explicit `--allow-inline`; never silently.
 - **Always pass the start gate.** Phase 0.4 cannot be skipped, even with --yes flags. The user has to confirm slugs.
 - **Always pass the post-/autoplan approval gate.** Phase 3 is non-negotiable.
 - **Never auto-merge a PR.** /ship stops at PR creation; /land-and-deploy is a separate skill.
