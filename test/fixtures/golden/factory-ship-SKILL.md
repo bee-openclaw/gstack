@@ -2818,10 +2818,28 @@ you missed it.>
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
+### PR target resolution (fork-aware)
+
+Before invoking `gh pr create` / `glab mr create`, resolve which repository the PR/MR should target. The default is the user's `origin` remote (their fork) — NOT `upstream` (the source repo, e.g. when forked from an open-source project). Without this, gh/glab can default to upstream and accidentally open a PR against the source repo, which is rarely what the user wants when the fork is their personal copy.
+
+```bash
+PR_TARGET_REMOTE="$($GSTACK_ROOT/bin/gstack-config get pr_target_remote 2>/dev/null || echo origin)"
+PR_REPO_URL="$(git remote get-url "$PR_TARGET_REMOTE" 2>/dev/null || git remote get-url origin)"
+PR_REPO="$(printf '%s' "$PR_REPO_URL" | sed -E 's|^.*github\.com[:/]([^/]+/[^/]+?)(\.git)?$|\1|;s|^.*gitlab\.com[:/]([^/]+/[^/]+?)(\.git)?$|\1|')"
+```
+
+`PR_TARGET_REMOTE` config: `origin` (default) targets the user's fork. Set to `upstream` if the user is doing open-source contribution-back work where PRs should target the source repo:
+
+```bash
+$GSTACK_ROOT/bin/gstack-config set pr_target_remote upstream
+```
+
+If only `origin` exists (no `upstream`), the fallback uses origin and behavior is unchanged.
+
 **If GitHub:**
 
 ```bash
-gh pr create --base <base> --title "v$NEW_VERSION <type>: <summary>" --body "$(cat <<'EOF'
+gh pr create --repo "$PR_REPO" --base <base> --title "v$NEW_VERSION <type>: <summary>" --body "$(cat <<'EOF'
 <PR body from above>
 EOF
 )"
@@ -2830,14 +2848,14 @@ EOF
 **If GitLab:**
 
 ```bash
-glab mr create -b <base> -t "v$NEW_VERSION <type>: <summary>" -d "$(cat <<'EOF'
+glab mr create -R "$PR_REPO" -b <base> -t "v$NEW_VERSION <type>: <summary>" -d "$(cat <<'EOF'
 <MR body from above>
 EOF
 )"
 ```
 
 **If neither CLI is available:**
-Print the branch name, remote URL, and instruct the user to create the PR/MR manually via the web UI. Do not stop — the code is pushed and ready.
+Print the branch name, remote URL of `$PR_TARGET_REMOTE`, and instruct the user to create the PR/MR manually via the web UI. Do not stop — the code is pushed and ready.
 
 **Output the PR/MR URL** — then proceed to Step 20.
 
@@ -2866,6 +2884,30 @@ Substitute from earlier steps:
 - **BRANCH**: current branch name
 
 This step is automatic — never skip it, never ask for confirmation.
+
+---
+
+## Step N+1: Orchestrator sentinel emission (env-gated)
+
+When `/ship` is invoked from the `/build` chain (orchestrator mode), the parent /build session reads the PR URL + version tag + commit SHA from a sentinel file. Detect via env vars and emit. When NOT in orchestrator mode, this entire step is a no-op — `/ship` behavior is byte-for-byte unchanged.
+
+```bash
+if [ -n "${GSTACK_RUN_ID:-}" ] && [ -n "${GSTACK_BUILDER_SLUG:-}" ] && [ -n "${GSTACK_COMPANY_SLUG:-}" ]; then
+  cat <<JSON | $GSTACK_BIN/gstack-build-step write-sentinel ship \
+    --run-id "$GSTACK_RUN_ID" \
+    --builder-slug "$GSTACK_BUILDER_SLUG" \
+    --company-slug "$GSTACK_COMPANY_SLUG"
+{
+  "status": "ok",
+  "pr_url": "<URL from gh pr create / gh pr view>",
+  "version_tag": "<contents of VERSION file at the time of the ship commit>",
+  "commit_sha": "<git rev-parse HEAD>"
+}
+JSON
+fi
+```
+
+This step is automatic — never skip it when env vars are set, never emit it when env vars are unset. /ship is the terminal stage of /build, so the sentinel does not include `context_for_next_stage`.
 
 ---
 
