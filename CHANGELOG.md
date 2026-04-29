@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.19.2.0] - 2026-04-29
+
+## **Test suite goes green. Seven pre-existing failures cleared so Phase A.5 dogfood `/qa` runs on a clean baseline.**
+
+`bun test` was carrying seven failures on main that pre-dated the orchestrator work: drifted ship-skill goldens, a `Bun.YAML.parse` call in a runtime that doesn't have it, a smoke test budgeted under the network round-trip, and a fixture-isolation race in browse Content extraction. None were from the orchestrator branch but all would have surfaced during Phase A.5's `/qa` stage and muddied dogfood signal. Each is fixed in its own bisectable commit. `bun test` exit code now 0 with zero `(fail)` lines.
+
+### What this means for builders
+
+Phase A.5 dogfood (real OPEN community + personal-utility runs) can now run with a clean test baseline — the `/qa` stage in `/build` won't trip over noise that has nothing to do with what it's testing. The four fixes are independent and small (each <40 lines), so any future bisect lands on a single clearly-labeled cause.
+
+### Itemized changes
+
+#### Fixed
+
+- `test/fixtures/golden/{claude,codex,factory}-ship-SKILL.md` — refreshed to match current per-host generated output. Goldens drifted in commit `9e1a178d` (fork-aware PR target resolution) but the goldens themselves weren't refreshed alongside the template change. Standard procedure: when an intentional template change lands, the goldens get regenerated.
+- `test/openclaw-native-skills.test.ts` — replaced `Bun.YAML.parse` with a small line-based parser. `Bun.YAML.parse` was added in Bun 1.2.21; this repo runs Bun 1.2.19, so the test was broken from the day it landed. The new parser matches the regex-based frontmatter handling already used in `scripts/gen-skill-docs.ts`. Test intent preserved: verify ONLY `name` + `description` keys, both non-empty strings.
+- `test/gstack-next-version.test.ts` — bumped the integration smoke test timeout from bun-test's 5s default to 30s. The test invokes `./bin/gstack-next-version` which makes a real `gh` API call; local timing is 4.9s so any network jitter pushed it over. Failures showed exact `5001.85ms` — classic just-over-the-line timeout. The CLI itself stays under 5s in normal conditions.
+- `browse/test/commands.test.ts` — switched the Content extraction `beforeAll` to `beforeEach`. The prior Navigation describe block leaves the browser on `forms.html`; a `beforeAll` `goto basic.html` could race with that final state, leaving early Content extraction tests reading forms.html content. `beforeEach` guarantees each test starts on `basic.html`. Tests that explicitly `goto forms.html` (forms / accessibility) still override correctly.
+
 ## [1.19.1.0] - 2026-04-29
 
 ## **First end-to-end /build run + the two safety patches it surfaced. Hard-fail on missing Agent tool, explicit gate-waiver confirmation.**
