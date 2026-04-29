@@ -48,6 +48,8 @@ function die(msg: string): never {
 
 function usage(): never {
   process.stderr.write([
+    'gstack-companies-export — tarball a company artifact tree for archival or hand-off',
+    '',
     'usage:',
     '  gstack-companies-export <company-slug> [--builder <slug>] [--out <path>]',
     '',

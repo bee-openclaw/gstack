@@ -58,6 +58,31 @@ If the input is a path that exists on disk and ends in `.md`, treat it as design
 
 ## Phase 0: Setup + start gate
 
+### 0.0 Agent-tool availability check (mandatory hard-fail)
+
+Before anything else — before deriving slugs, before AskUserQuestion, before touching disk — verify the **Agent tool is available in your tool list**. The Agent tool is the spawn-per-stage mechanism (Premise 5); without it, /build cannot do what it claims to do, and falling back to inline execution silently corrupts dogfood signal (the run looks like spawn-per-stage in logs but isn't).
+
+Check your own tool list. If "Agent" is NOT present:
+
+1. **Hard-fail.** Print the following message verbatim and exit, no side effects, no sentinel files written:
+
+   > /build requires the Agent tool to spawn sub-agents per stage (Premise 5). The Agent tool is not available in this session. Refusing to run — silent inline-fallback would corrupt dogfood signal and violate the spawn-per-stage architecture.
+   >
+   > Options:
+   >   1. Re-invoke /build from a session/host where the Agent tool is enabled (Claude Code with default tools).
+   >   2. If you genuinely want inline execution (single-session, no spawn isolation, no per-stage cost accounting), pass `--allow-inline` explicitly. The chain will still run but every stage executes in this same context window. NOT recommended for dogfood runs — Phase A.5 results will be invalid.
+
+2. If the user re-invokes with `--allow-inline`, set `INLINE_MODE=true` and proceed. Add a banner to the final summary: `mode: INLINE (Agent tool unavailable, spawn-per-stage disabled)`. Skip cost accumulation per stage; no Agent-tool `<usage>` blocks exist in inline mode.
+
+3. Log the check result to `$DECISIONS_LOG` after Phase 0.5 resolves paths:
+
+   ```bash
+   echo "$(jq -n --arg r "$RUN_ID" --arg m "<spawn|inline>" \
+     '{ts: now | todate, gate:"agent-tool-check", mode:$m, run_id:$r}')" >> "$DECISIONS_LOG"
+   ```
+
+This check exists because of v1.19.0.1's first end-to-end run: the Agent tool was unavailable in the skill-runtime context and /build silently degraded to inline. The run "succeeded" but didn't validate the architecture. Hard-fail is the only safe default.
+
 ### 0.1 Builder slug
 
 ```bash
@@ -376,8 +401,42 @@ GSTACK_RUN_ID="$RUN_ID" GSTACK_BUILDER_SLUG="$BUILDER_SLUG" GSTACK_COMPANY_SLUG=
 
 Between Phase 2 and Phase 3, between Phase 4 and Phase 5, AND any other point you notice your context approaching its limit, pause and run `/context-save` (read `context-save/SKILL.md` and follow it). The sentinel files are durable; your in-memory state is not. After /context-save, you can restore via `/context-restore` and pick up at the next phase, or the user can re-run /build with the same company slug to resume from sentinels.
 
+## Gate-waiver discipline
+
+The user may, mid-run, say things like "do testing yourself", "skip QA", "I'll review later", "just keep going", "you decide", or otherwise tell you to bypass an upcoming gate. **Never auto-resolve gates from implicit/colloquial waiver language.** The gates exist precisely because the user shouldn't be coerced into one-word approval of a multi-step chain.
+
+When you detect waiver phrasing OR are about to skip an AskUserQuestion you'd normally show, stop and ask explicitly:
+
+> You said "<their phrase>". This would waive the following gate(s):
+>   - <list each gate by name and what it normally asks>
+>
+> Waive all of them? (y/N — defaults to N, which means I'll ask each gate as we reach it.)
+
+Rules:
+
+1. **Default is N.** If the user replies `y` (or "yes", "waive all", explicit affirmative), set `WAIVED_GATES=true` for the duration of THIS run only. Log the waiver to `$DECISIONS_LOG`:
+
+   ```bash
+   echo "$(jq -n --arg r "$RUN_ID" --arg p "<user's original phrase>" --arg g "<comma-list of waived gates>" \
+     '{ts: now | todate, gate:"waiver-confirmation", choice:"waived", phrase:$p, gates:$g, run_id:$r}')" >> "$DECISIONS_LOG"
+   ```
+
+2. **Anything other than an explicit affirmative is N.** "Sure" alone is not affirmative — re-ask. "I guess" is not affirmative — re-ask. The user has to actually mean it.
+
+3. **Waivers are single-run, single-scope.** A waiver granted before /qa does NOT carry into a later /build invocation. A waiver granted for "the QA gate" does NOT cover the post-/autoplan approval gate (Phase 3) — that one is non-negotiable per Premise 7 and CANNOT be waived even with `WAIVED_GATES=true`.
+
+4. **The post-/autoplan approval gate (Phase 3) and the start gate (Phase 0.4) are never waivable.** If the user tries, decline:
+
+   > The post-/autoplan approval gate is the keystone of human agency in /build (Premise 7). I can't waive it. We can either pause here so you can read the plan, or you can approve it directly when we reach it.
+
+5. **Log every gate that was about to fire even when waived.** Future retros need to see "this gate WOULD have asked X, but was waived." Append to `$DECISIONS_LOG` with `choice: "waived-prior"` and the gate name.
+
+This rule exists because of v1.19.0.1's run: the user said "do testing yourself" mid-chain and subsequent gates auto-resolved silently. The user later said the chain felt one-sided. Explicit confirmation is cheap; a corrupted dogfood run is expensive.
+
 ## Hard rules
 
+- **Always verify the Agent tool exists before any side effects.** Phase 0.0 is non-negotiable. Inline-fallback only happens with explicit `--allow-inline`; never silently.
+- **Never auto-resolve a gate from implicit waiver language.** Gate-waiver discipline above is mandatory. The post-/autoplan approval gate (Phase 3) and the start gate (Phase 0.4) cannot be waived even with explicit confirmation.
 - **Always pass the start gate.** Phase 0.4 cannot be skipped, even with --yes flags. The user has to confirm slugs.
 - **Always pass the post-/autoplan approval gate.** Phase 3 is non-negotiable.
 - **Never auto-merge a PR.** /ship stops at PR creation; /land-and-deploy is a separate skill.

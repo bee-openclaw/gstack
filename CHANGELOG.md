@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.19.1.0] - 2026-04-29
+
+## **First end-to-end /build run + the two safety patches it surfaced. Hard-fail on missing Agent tool, explicit gate-waiver confirmation.**
+
+The `/build` orchestrator chain (`/office-hours` -> `/autoplan` -> approval gate -> `/implement` -> `/qa` -> `/ship`) shipped on `office-hours-implement` without ever being run end-to-end against a real seed. This release does both: the first end-to-end run against a synthetic todo seed, AND the two safety patches that the run surfaced. The seed was deliberately tiny — a single-file vanilla HTML/CSS/JS todo app with `localStorage` persistence — picked so any failure in the chain would be orchestrator-level, not implementation-level. The artifact lives under `synthetic-tests/simple-todo-localstorage/` and opens directly via `file://` in any browser. Every chain stage produced a `status: ok` sentinel JSON in `~/.gstack/builders/bilal-ahmed/companies/simple-todo-localstorage/runs/<run-id>/`. The run also surfaced two findings worth fixing immediately: (1) `/build` silently degraded to inline execution when the Agent tool was unavailable in the skill-runtime context — chain looked successful, but spawn-per-stage was never validated, and dogfood signal was corrupted; (2) when the user said "do testing yourself" mid-run, subsequent gates auto-resolved without explicit confirmation, leaving the chain feeling one-sided. Both are now fixed: the orchestrator hard-fails at start gate if the Agent tool isn't available (with explicit `--allow-inline` escape hatch), and waiver phrasing now triggers a "Waive [list]? y/N" prompt with default N. Phase A.5 dogfood (real OPEN community + personal-utility) can now run with trustworthy signal.
+
+### What this means for builders
+
+You can now `/build "<seed prompt>"` and watch the chain produce a working artifact end-to-end — and trust that what looks like a spawn-per-stage run actually IS one. The synthetic todo app at `synthetic-tests/simple-todo-localstorage/index.html` is the proof of concept: ~280 lines, runs offline, no frameworks. Open it, add a todo, refresh, see the todo survive. The two safety patches mean Phase A.5 dogfood signal will be honest: no silent inline-fallback corrupting the architecture validation, no implicit gate waivers compressing user agency. The post-/autoplan approval gate (Phase 3) and start gate (Phase 0.4) remain non-waivable per Premise 7, even with explicit `WAIVED_GATES=true`.
+
+### Itemized changes
+
+#### Added
+
+- `synthetic-tests/simple-todo-localstorage/index.html` — single-file vanilla HTML/CSS/JS todo app with `localStorage` persistence under key `simple-todo-localstorage`. Add / toggle / delete todos. Empty input rejected. Enter-key submits. `crypto.randomUUID()` ids with a `Date.now() + Math.random()` fallback. Light / dark via `prefers-color-scheme`. No external scripts, no CDN, runs from `file://`.
+- `synthetic-tests/simple-todo-localstorage/README.md` — provenance metadata (run id `91392570-e6b2-4fbb-bbe2-dd7c6b0f9389`, builder slug `bilal-ahmed`, company slug `simple-todo-localstorage`) so anyone reading this diff knows it came from the `/build` end-to-end run, not someone's accidental commit.
+- `/build` Phase 0.0: Agent-tool availability check. Hard-fails before any side effects when the Agent tool is missing from the skill-runtime context. Explicit `--allow-inline` escape hatch documented for users who genuinely want single-session inline execution (e.g., diagnostic runs); the inline mode is banner-marked in the final summary so dogfood signal stays trustworthy.
+- `/build` Gate-waiver discipline: explicit "Waive [list of gates]? y/N" confirmation before any waiver from colloquial phrasing ("do testing yourself", "skip QA", "just keep going"). Default is N. The post-/autoplan approval gate and start gate cannot be waived even with `WAIVED_GATES=true` — those are keystones of human agency in /build.
+
+#### Fixed
+
+- `/build` no longer silently degrades to inline execution when the Agent tool is missing. The first end-to-end run (this branch's prior commits) hit this exact failure mode — the chain "succeeded" but spawn-per-stage was never validated. Hard-fail is the only safe default for dogfood runs.
+- `/build` no longer auto-resolves subsequent gates after one mid-run waiver. Single-run scope, single-use unless the user explicitly says "waive all". Every waiver is logged to the run's decisions log with the original phrase, so retros can see what would have been asked.
+
+#### For contributors
+
+- First successful end-to-end run of the `/build` orchestrator with all five sentinels (`office-hours-result.json`, `autoplan-result.json`, `implement-result.json`, `qa-result.json`, `ship-result.json`) written and approval gates honored.
+- `/build`'s SKILL.md needs one remaining follow-up edit: document that the `/implement` sentinel requires `commit_shas` (plural array), `last_ac_index`, and `tests_passing` — the docs section currently shows a single-sha schema. The Agent-tool runtime requirement and inline-fallback escape hatch are now documented in Phase 0.0.
+
 ## [1.15.0.0] - 2026-04-26
 
 ## **Real-PTY test harness ships. 11 plan-mode E2E tests, 23 unit tests, and 50K fewer tokens per invocation.**

@@ -168,6 +168,8 @@ function die(msg: string): never {
 
 function usage(): never {
   process.stderr.write([
+    'gstack-build-step — sentinel-file IPC helper for the /build chain orchestrator',
+    '',
     'usage:',
     '  gstack-build-step paths             --run-id <uuid> --builder-slug <s> --company-slug <s>',
     '  gstack-build-step read-sentinel  <stage> --run-id <uuid> --builder-slug <s> --company-slug <s>',
